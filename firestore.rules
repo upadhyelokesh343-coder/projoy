@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Since the user requested a simple login form WITHOUT OTP/Firebase Auth,
+    // request.auth will always be null. We have to allow public access for the prototype.
+    // In a real production app, Firebase Auth should be used.
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
