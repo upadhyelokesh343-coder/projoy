@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+ import React, { useState, useEffect } from 'react';
 import { Download, X, Smartphone, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
