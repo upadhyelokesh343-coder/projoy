@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ProJoy</title>
+    <meta name="description" content="ProJoy Tournament & Wallet Platform" />
+    <meta property="og:title" content="Nexus Gaming: Refer & Earn Rewards!" />
+    <meta property="og:description" content="Join my gaming platform and earn real cash rewards! Use my unique referral code PJ09425 to sign up." />
+    <meta property="og:image" content="https://projoy.vercel.app/logo.jpg" />
+    <meta property="og:url" content="https://projoy.vercel.app" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#10b981" />
+    <link rel="manifest" href="/manifest.json" />
+    <!-- Google Fonts for sleek typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      window.deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.deferredPrompt = e;
+        window.dispatchEvent(new CustomEvent('pwa-prompt-available', { detail: e }));
+      });
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js');
+        });
+      }
+    </script>
+  </head>
+  <body class="bg-neutral-950 text-neutral-50 font-['Outfit'] antialiased selection:bg-emerald-500/30">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
