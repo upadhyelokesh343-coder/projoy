@@ -32,7 +32,16 @@
           navigator.serviceWorker.register('/sw.js');
         });
       }
-    </script>
+      <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<script>
+  window.OneSignalDeferred = window.OneSignalDeferred || [];
+  OneSignalDeferred.push(async function(OneSignal) {
+    await OneSignal.init({
+      appId: "4944140e-31b5-49eb-a08d-fa884a6f5390",
+    });
+  });
+</script>
+    
   </head>
   <body class="bg-neutral-950 text-neutral-50 font-['Outfit'] antialiased selection:bg-emerald-500/30">
     <div id="root"></div>
