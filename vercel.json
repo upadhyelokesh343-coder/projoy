@@ -1,6 +1,12 @@
 {
   "rewrites": [
-    { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
-    { "source": "/((?!sitemap\\.xml).*)", "destination": "/index.html" }
+    {
+      "source": "/api/:path*",
+      "destination": "https://ais-dev-wffqsfdcyvoujibjqaj4jk-614342679965.asia-east1.run.app/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }

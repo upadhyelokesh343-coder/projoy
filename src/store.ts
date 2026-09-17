@@ -57,8 +57,11 @@ interface AppState {
   updateProfile: (updates: Partial<User>) => Promise<void>;
   
   // Wallet
-  requestDeposit: (amount: number, reference: string, paymentAmount?: number) => Promise<void>;
-  requestWithdraw: (amount: number, reference: string) => Promise<void>;
+  createBondPayOrder: (amount: number) => Promise<{ success: boolean; payment_url?: string; order_no?: string; merchant_order_no?: string; message?: string }>;
+  syncBondPayStatus: (orderId: string) => Promise<{ success: boolean; status: TransactionStatus; message?: string; data?: any; credited?: boolean }>;
+  requestDeposit: (amount: number, reference: string, paymentAmount?: number, utr?: string) => Promise<string>;
+  updateTransactionUtr: (orderId: string, utr: string) => Promise<boolean>;
+  requestWithdraw: (amount: number, reference: string, utr?: string) => Promise<void>;
   processReferral: (userId: string) => Promise<void>;
   
   // Tournaments
@@ -461,12 +464,213 @@ export const useStore = create<AppState>()((set, get) => ({
     // Realtime listener will update state
   },
 
-  requestDeposit: async (amount, reference, paymentAmount) => {
+  createBondPayOrder: async (amount: number) => {
     const { currentUser } = get();
-    if (!currentUser) return;
+    if (!currentUser) return { success: false, message: 'Please login first' };
+    
+    const merchantOrderNo = `ORDER_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    
+    try {
+      const res = await fetch('/api/bondpay/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          userId: currentUser.id,
+          merchant_order_no: merchantOrderNo
+        })
+      });
+      
+      let data: any = {};
+      try {
+        const rawText = await res.text();
+        data = JSON.parse(rawText);
+      } catch (parseErr) {
+        console.error('Failed to parse gateway JSON response:', parseErr);
+        return { success: false, message: 'Invalid response received from payment server.' };
+      }
+
+      if (data && data.success && data.payment_url) {
+        const bpOrderNo = data.order_no || '';
+        const mOrderNo = data.merchant_order_no || merchantOrderNo;
+        const utrVal = bpOrderNo || mOrderNo;
+
+        // Create / merge pending deposit transaction in Firestore
+        const txId = mOrderNo;
+        const txData: any = {
+          userId: currentUser.id,
+          type: 'deposit',
+          amount: Number(amount),
+          requestedAmount: Number(amount),
+          paymentAmount: Number(amount),
+          status: 'pending',
+          date: new Date().toISOString(),
+          reference: mOrderNo,
+          merchantOrderNo: mOrderNo,
+          bondPayOrderNo: bpOrderNo,
+          utr: utrVal
+        };
+        
+        try {
+          await setDoc(doc(db, 'transactions', txId), txData, { merge: true });
+        } catch (dbErr) {
+          console.error('Error writing transaction to Firestore:', dbErr);
+        }
+
+        set(state => ({
+          transactions: [
+            { id: txId, ...txData },
+            ...state.transactions.filter(t => t.id !== txId && t.reference !== mOrderNo)
+          ]
+        }));
+        
+        return {
+          success: true,
+          payment_url: data.payment_url,
+          order_no: bpOrderNo,
+          merchant_order_no: mOrderNo
+        };
+      } else {
+        return { success: false, message: data?.message || 'Failed to generate payment gateway link' };
+      }
+    } catch (err: any) {
+      console.error('Error creating BondPay order:', err);
+      return { success: false, message: err?.message || 'Network error connecting to payment gateway' };
+    }
+  },
+
+  syncBondPayStatus: async (orderId: string) => {
+    try {
+      if (!orderId) return { success: false, status: 'pending' as TransactionStatus, message: 'Invalid order ID' };
+      
+      const res = await fetch(`/api/bondpay/check-status/${encodeURIComponent(orderId)}`);
+      let data: any = {};
+      try {
+        const text = await res.text();
+        data = JSON.parse(text);
+      } catch (e) {
+        return { success: false, status: 'pending' as TransactionStatus, message: 'Server response error' };
+      }
+
+      if (data && data.success) {
+        const rawStatus = String(data.status || 'pending').toLowerCase();
+        let targetStatus: TransactionStatus = 'pending';
+        if (rawStatus === 'completed' || rawStatus === 'approved' || rawStatus === 'success') {
+          targetStatus = 'completed';
+        } else if (rawStatus === 'failed' || rawStatus === 'rejected' || rawStatus === 'failure') {
+          targetStatus = 'failed';
+        }
+
+        const { transactions, currentUser, updateTransactionStatus } = get();
+        const matchedTx = transactions.find(
+          (tx) => tx.id === orderId || tx.reference === orderId || tx.merchantOrderNo === orderId
+        );
+
+        // If status transitioned to completed and wasn't previously completed, trigger balance credit
+        if (matchedTx && targetStatus === 'completed' && matchedTx.status !== 'completed' && matchedTx.status !== 'approved') {
+          await updateTransactionStatus(matchedTx.id, 'completed');
+        } else {
+          set((state) => ({
+            transactions: state.transactions.map((tx) =>
+              tx.id === orderId || tx.reference === orderId || tx.merchantOrderNo === orderId
+                ? { 
+                    ...tx, 
+                    status: targetStatus,
+                    bondPayOrderNo: data.bondPayOrderNo || tx.bondPayOrderNo,
+                    merchantOrderNo: data.merchantOrderNo || tx.merchantOrderNo,
+                    utr: data.utr || tx.utr
+                  }
+                : tx
+            )
+          }));
+        }
+
+        return { 
+          success: true, 
+          status: targetStatus, 
+          data, 
+          credited: targetStatus === 'completed',
+          message: targetStatus === 'completed' ? 'Payment Verified! Wallet credited successfully.' : `Status is ${targetStatus.toUpperCase()}` 
+        };
+      }
+      return { success: false, status: 'pending' as TransactionStatus, message: data?.message || 'Transaction not found' };
+    } catch (err: any) {
+      console.warn('Error checking BondPay status:', err);
+      return { success: false, status: 'pending' as TransactionStatus, message: err?.message || 'Network error' };
+    }
+  },
+
+  updateTransactionUtr: async (orderIdOrTxId, utr) => {
+    try {
+      const { currentUser } = get();
+      if (!currentUser) return false;
+
+      const updateLocal = (status: TransactionStatus = 'pending') => {
+        set((state) => ({
+          transactions: state.transactions.map((tx) =>
+            tx.id === orderIdOrTxId || tx.reference === orderIdOrTxId
+              ? { ...tx, utr, status: (tx.status === 'completed' || tx.status === 'approved' || tx.status === 'failed' ? tx.status : status) }
+              : tx
+          )
+        }));
+      };
+
+      // 1. Try finding by direct doc ID first
+      try {
+        const directRef = doc(db, 'transactions', orderIdOrTxId);
+        const directSnap = await getDoc(directRef);
+        if (directSnap.exists()) {
+          const currentStatus = directSnap.data().status;
+          const newStatus = (currentStatus === 'completed' || currentStatus === 'approved' || currentStatus === 'failed') 
+            ? currentStatus 
+            : 'pending';
+          await updateDoc(directRef, { utr, status: newStatus });
+          updateLocal(newStatus);
+          return true;
+        }
+      } catch (e) {}
+
+      // 2. Try by reference == orderId with userId
+      const q = query(collection(db, 'transactions'), where('userId', '==', currentUser.id), where('reference', '==', orderIdOrTxId));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const txDoc = snap.docs[0];
+        const currentStatus = txDoc.data().status;
+        const newStatus = (currentStatus === 'completed' || currentStatus === 'approved' || currentStatus === 'failed') 
+          ? currentStatus 
+          : 'pending';
+        await updateDoc(txDoc.ref, { utr, status: newStatus });
+        updateLocal(newStatus);
+        return true;
+      }
+
+      // 3. Fallback without userId filter
+      const q2 = query(collection(db, 'transactions'), where('reference', '==', orderIdOrTxId));
+      const snap2 = await getDocs(q2);
+      if (!snap2.empty) {
+        const txDoc = snap2.docs[0];
+        const currentStatus = txDoc.data().status;
+        const newStatus = (currentStatus === 'completed' || currentStatus === 'approved' || currentStatus === 'failed') 
+          ? currentStatus 
+          : 'pending';
+        await updateDoc(txDoc.ref, { utr, status: newStatus });
+        updateLocal(newStatus);
+        return true;
+      }
+
+      updateLocal('pending');
+      return true;
+    } catch (e) {
+      console.error("Error updating transaction UTR:", e);
+      return false;
+    }
+  },
+  requestDeposit: async (amount, reference, paymentAmount, utr) => {
+    const { currentUser } = get();
+    if (!currentUser) return '';
 
     const txId = generateId();
-    await setDoc(doc(db, 'transactions', txId), {
+    const data: any = {
       userId: currentUser.id,
       type: 'deposit',
       amount, // Base amount to credit
@@ -475,10 +679,25 @@ export const useStore = create<AppState>()((set, get) => ({
       status: 'pending',
       date: new Date().toISOString(),
       reference,
-    });
+      utr: utr || ''
+    };
+
+    try {
+      await setDoc(doc(db, 'transactions', txId), data);
+      set((state) => ({
+        transactions: [
+          { id: txId, ...data },
+          ...state.transactions.filter(t => t.id !== txId)
+        ]
+      }));
+      return txId;
+    } catch (e) {
+      console.error("Error creating deposit in Firestore:", e);
+      return '';
+    }
   },
 
-  requestWithdraw: async (amount, reference) => {
+  requestWithdraw: async (amount, reference, utr) => {
     const { currentUser } = get();
     if (!currentUser || currentUser.balance < amount) return;
 
@@ -487,14 +706,18 @@ export const useStore = create<AppState>()((set, get) => ({
     await updateDoc(userRef, { balance: currentUser.balance - amount });
     
     const txId = generateId();
-    await setDoc(doc(db, 'transactions', txId), {
+    const txData: any = {
       userId: currentUser.id,
       type: 'withdraw',
       amount,
       status: 'pending',
       date: new Date().toISOString(),
       reference,
-    });
+    };
+    if (utr) {
+      txData.utr = utr;
+    }
+    await setDoc(doc(db, 'transactions', txId), txData);
   },
 
   processReferral: async (userId: string) => {
@@ -592,21 +815,37 @@ export const useStore = create<AppState>()((set, get) => ({
   updateTransactionStatus: async (transactionId, status) => {
     const { transactions } = get();
     const tx = transactions.find(t => t.id === transactionId);
-    if (!tx || tx.status !== 'pending') return;
+    if (!tx) return;
+
+    // Call server endpoint for atomic server-side sync & fallback
+    try {
+      fetch('/api/bondpay/admin-update-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionId, status })
+      }).catch(e => console.warn("Background admin-update-status call failed:", e));
+    } catch (e) {}
+
+    const isApproving = status === 'approved' || status === 'completed';
+    const isRejecting = status === 'rejected' || status === 'failed';
+    const previousStatus = tx.status;
 
     const batch = writeBatch(db);
     const txRef = doc(db, 'transactions', transactionId);
-    batch.update(txRef, { status });
+    batch.update(txRef, { 
+      status: isApproving ? 'completed' : status,
+      updatedAt: new Date().toISOString()
+    });
 
     const userRef = doc(db, 'users', tx.userId);
     const userSnap = await getDoc(userRef);
     
     if (userSnap.exists()) {
-      const currentBalance = userSnap.data().balance || 0;
+      const currentBalance = Number(userSnap.data().balance || 0);
       
-      if (tx.type === 'deposit' && status === 'approved') {
+      if (tx.type === 'deposit' && isApproving && previousStatus !== 'approved' && previousStatus !== 'completed') {
         // Check if first deposit
-        const userDeposits = transactions.filter(t => t.userId === tx.userId && t.type === 'deposit' && t.status === 'approved');
+        const userDeposits = transactions.filter(t => t.userId === tx.userId && t.type === 'deposit' && (t.status === 'approved' || t.status === 'completed') && t.id !== transactionId);
         
         if (userDeposits.length === 0) {
           const bonusAmount = Math.floor(tx.amount * 0.2); // 20% bonus
@@ -624,12 +863,19 @@ export const useStore = create<AppState>()((set, get) => ({
         } else {
           batch.update(userRef, { balance: currentBalance + tx.amount });
         }
-      } else if (tx.type === 'withdraw' && status === 'rejected') {
+      } else if (tx.type === 'withdraw' && isRejecting && (previousStatus === 'approved' || previousStatus === 'completed')) {
         batch.update(userRef, { balance: currentBalance + tx.amount });
       }
     }
     
     await batch.commit();
+
+    set(state => ({
+      transactions: state.transactions.map(t =>
+        t.id === transactionId ? { ...t, status: isApproving ? 'completed' : status } : t
+      )
+    }));
+
     get().processReferral(tx.userId);
   },
 

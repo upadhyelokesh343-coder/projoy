@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { useState } from 'react';
 import { useStore } from '../store';
-import { ShieldCheck, Plus, Check, X, Trophy, Wallet, Users as UsersIcon, Gamepad2, Calendar, Smartphone, Mail, Banknote, Trash, LayoutDashboard, ArrowLeft, Share2, Clock, CheckCircle2, Coins, Copy, MessageSquare } from 'lucide-react';
+import { ShieldCheck, Plus, Check, X, Trophy, Wallet, Users as UsersIcon, Gamepad2, Calendar, Smartphone, Mail, Banknote, Trash, LayoutDashboard, ArrowLeft, Share2, Clock, CheckCircle2, Coins, Copy, MessageSquare, Zap, RefreshCw, XCircle } from 'lucide-react';
 import { isValid, parseISO, format } from 'date-fns';
 import { db } from '../lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc, onSnapshot, orderBy } from 'firebase/firestore';
@@ -21,6 +21,7 @@ export default function AdminDashboard() {
   const users = useStore(state => state.users);
   const transactions = useStore(state => state.transactions);
   const updateTransactionStatus = useStore(state => state.updateTransactionStatus);
+  const updateTransactionUtr = useStore(state => state.updateTransactionUtr);
   const createTournament = useStore(state => state.createTournament);
   const deleteTournament = useStore(state => state.deleteTournament);
   const updateTournament = useStore(state => state.updateTournament);
@@ -30,9 +31,17 @@ export default function AdminDashboard() {
   const naviShares = useStore(state => state.naviShares);
   const updateNaviShareStatus = useStore(state => state.updateNaviShareStatus);
   const deleteUser = useStore(state => state.deleteUser);
+  const syncBondPayStatus = useStore(state => state.syncBondPayStatus);
   
   const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'tournaments' | 'transactions' | 'rooms_winners' | 'navi_shares' | 'settings' | 'transfers' | 'add_funds' | 'messages'>('overview');
   const [selectedChatUser, setSelectedChatUser] = useState<{ id: string; name: string } | null>(null);
+
+  // Admin UTR edit state & Transaction filter state
+  const [adminEditingUtr, setAdminEditingUtr] = useState<{ id: string; ref: string; currentUtr?: string } | null>(null);
+  const [adminUtrInput, setAdminUtrInput] = useState('');
+  const [isAdminSavingUtr, setIsAdminSavingUtr] = useState(false);
+  const [adminTxFilter, setAdminTxFilter] = useState<'pending' | 'completed' | 'failed' | 'all'>('pending');
+  const [adminSyncingId, setAdminSyncingId] = useState<string | null>(null);
   
   // Tournament form state
   const [title, setTitle] = useState('');
@@ -264,7 +273,9 @@ export default function AdminDashboard() {
     }
   };
 
-  const pendingTransactions = transactions.filter(t => t.status === 'pending' && t.type !== 'withdraw');
+  const pendingTransactions = transactions.filter(
+    t => t.status === 'pending' && t.type !== 'withdraw'
+  );
   const pendingWithdrawals = transactions.filter(t => t.status === 'pending' && t.type === 'withdraw');
   const depositTransactions = transactions.filter(t => t.type === 'deposit');
 
@@ -731,7 +742,6 @@ export default function AdminDashboard() {
       )}
 
       {/* Transactions / Wallet Tab */}
-      {/* Transactions / Wallet Tab */}
       {activeTab === 'transactions' && (
         <div className="space-y-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
@@ -745,114 +755,239 @@ export default function AdminDashboard() {
                   Wallet & Funds Manager
                 </h3>
                 <p className="text-xs text-neutral-400 mt-1">
-                  Approve or reject deposit requests.
+                  Manage deposit approvals, check gateway status, and update wallet transactions.
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold flex items-center gap-2 text-sm uppercase tracking-wider text-neutral-400"><Wallet className="w-4 h-4 text-emerald-400" /> Pending Requests</h3>
-            </div>
+          {/* Filter Bar */}
+          <div className="flex flex-wrap gap-2 p-1.5 bg-neutral-900 border border-neutral-800 rounded-2xl">
+            {[
+              { key: 'pending', label: 'Pending Requests', count: transactions.filter(t => t.status === 'pending' || (!t.status && t.type === 'deposit')).length, color: 'text-yellow-400' },
+              { key: 'completed', label: 'Completed / Approved', count: transactions.filter(t => t.status === 'completed' || t.status === 'approved').length, color: 'text-emerald-400' },
+              { key: 'failed', label: 'Failed / Rejected', count: transactions.filter(t => t.status === 'failed' || t.status === 'rejected').length, color: 'text-red-400' },
+              { key: 'all', label: 'All Transactions', count: transactions.length, color: 'text-white' },
+            ].map(tab => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setAdminTxFilter(tab.key as any)}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                  adminTxFilter === tab.key
+                    ? 'bg-neutral-800 text-white shadow-md border border-neutral-700'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold bg-neutral-950 ${tab.color}`}>
+                  {tab.count}
+                </span>
+              </button>
+            ))}
+          </div>
 
-              <div className="grid gap-4">
-                {pendingTransactions.length === 0 ? (
-                  <div className="p-8 bg-neutral-900 border border-neutral-800 rounded-3xl text-center flex flex-col items-center justify-center">
-                    <Check className="w-12 h-12 text-emerald-500/50 mb-3" />
-                    <p className="text-neutral-400 font-medium">All caught up!</p>
-                    <p className="text-sm text-neutral-500 mt-1">No pending deposit or withdrawal requests.</p>
-                  </div>
-                ) : (
-                  pendingTransactions.map(tx => {
-                    const user = users.find(u => u.id === tx.userId);
-                    const isDeposit = tx.type === 'deposit';
-                    
-                    return (
-                      <div key={tx.id} className={`bg-neutral-900 border p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-5 transition-all ${isDeposit ? 'border-emerald-500/20' : 'border-blue-500/20'}`}>
+          <div className="space-y-6">
+            <div className="grid gap-4">
+              {(() => {
+                const filtered = transactions.filter(tx => {
+                  if (adminTxFilter === 'pending') return tx.status === 'pending' || (!tx.status && tx.type === 'deposit');
+                  if (adminTxFilter === 'completed') return tx.status === 'completed' || tx.status === 'approved';
+                  if (adminTxFilter === 'failed') return tx.status === 'failed' || tx.status === 'rejected';
+                  return true;
+                });
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="p-8 bg-neutral-900 border border-neutral-800 rounded-3xl text-center flex flex-col items-center justify-center">
+                      <Check className="w-12 h-12 text-emerald-500/50 mb-3" />
+                      <p className="text-neutral-400 font-medium">No {adminTxFilter} transactions found.</p>
+                      <p className="text-sm text-neutral-500 mt-1">All entries are up to date.</p>
+                    </div>
+                  );
+                }
+
+                return filtered.map(tx => {
+                  const user = users.find(u => u.id === tx.userId);
+                  const isDeposit = tx.type === 'deposit';
+                  const isSuccess = tx.status === 'completed' || tx.status === 'approved';
+                  const isFailed = tx.status === 'failed' || tx.status === 'rejected';
+                  const isPending = tx.status === 'pending' || (!tx.status && tx.type === 'deposit');
+                  const isSyncing = adminSyncingId === (tx.reference || tx.id);
+
+                  return (
+                    <div 
+                      key={tx.id} 
+                      className={`bg-neutral-900 border p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-5 transition-all ${
+                        isPending ? 'border-yellow-500/30' : isSuccess ? 'border-emerald-500/20' : 'border-red-500/20'
+                      }`}
+                    >
+                      <div className="flex gap-4 items-start">
+                        <div className={`p-3 rounded-xl flex-shrink-0 ${
+                          isDeposit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-blue-500/10 text-blue-400'
+                        }`}>
+                          <Wallet className="w-6 h-6" />
+                        </div>
                         
-                        <div className="flex gap-4 items-start">
-                          <div className={`p-3 rounded-xl flex-shrink-0 ${isDeposit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-blue-500/10 text-blue-400'}`}>
-                            <Wallet className="w-6 h-6" />
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2.5 flex-wrap mb-1">
+                            <span className={`text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wider ${
+                              isDeposit ? 'bg-emerald-500/20 text-emerald-400' : 'bg-blue-500/20 text-blue-400'
+                            }`}>
+                              {isDeposit ? 'Add Money' : 'Withdraw'}
+                            </span>
+                            
+                            {isSuccess && (
+                              <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3" /> SUCCESS
+                              </span>
+                            )}
+                            {isFailed && (
+                              <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-red-500/20 text-red-400 border border-red-500/30 flex items-center gap-1">
+                                <XCircle className="w-3 h-3" /> FAILED
+                              </span>
+                            )}
+                            {isPending && (
+                              <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 flex items-center gap-1">
+                                <Clock className="w-3 h-3" /> PENDING
+                              </span>
+                            )}
+
+                            <span className="text-xs text-neutral-500">{safeFormatDate(tx.date)}</span>
                           </div>
                           
-                          <div>
-                            <div className="flex items-center gap-3 mb-1">
-                              <span className={`text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wider ${isDeposit ? 'bg-emerald-500/20 text-emerald-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                                {isDeposit ? 'Add Money' : 'Withdraw'}
-                              </span>
-                              <span className="text-xs text-neutral-500">{safeFormatDate(tx.date)}</span>
-                            </div>
-                            
-                            <div className="mt-3">
-                               <div className="flex items-baseline gap-2 mb-1">
-                                 <p className="text-3xl font-bold text-white">₹{tx.paymentAmount || tx.amount}</p>
-                                 {tx.paymentAmount && tx.paymentAmount !== tx.amount && (
-                                   <span className="text-xs text-neutral-500 font-medium">(Orig: ₹{tx.amount})</span>
-                                 )}
-                               </div>
-                               <div className="space-y-1 mt-2">
-                                 <p className="text-sm text-neutral-300 flex items-center gap-1.5">
-                                   <UsersIcon className="w-4 h-4 text-neutral-500" /> {user?.name || 'Unknown User'}
-                                 </p>
-                                 <p className="text-sm text-emerald-400 font-bold flex items-center gap-1.5 bg-emerald-500/10 w-max px-2 py-1 rounded">
-                                   <Smartphone className="w-4 h-4" /> {user?.phone ? `+91 ${user.phone}` : 'No phone'}
-                                 </p>
-                                 <p className="text-xs text-neutral-500 font-mono mt-1">Ref/UPI: {tx.reference}</p>
-                               </div>
-                            </div>
-                          </div>
-                        </div>
-                        
-                        <div className="flex md:flex-col gap-2 w-full md:w-auto">
-                          <button onClick={() => updateTransactionStatus(tx.id, 'approved')} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 px-6 py-3 rounded-xl font-bold transition-all shadow-lg shadow-emerald-500/20">
-                            <Check className="w-5 h-5" /> Approve
-                          </button>
-                          <button onClick={() => updateTransactionStatus(tx.id, 'rejected')} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-neutral-950 border border-neutral-800 text-red-400 hover:bg-red-500/10 px-6 py-3 rounded-xl font-bold transition-all">
-                            <X className="w-5 h-5" /> Reject
-                          </button>
-                        </div>
-                        
-                      </div>
-                    )
-                  })
-                )}
-                
-                {/* Show recent completed deposits just for view */}
-                {depositTransactions.filter(t => t.status === 'completed' || t.status === 'approved').length > 0 && (
-                  <div className="mt-8">
-                    <h4 className="text-xs font-bold text-neutral-500 uppercase tracking-wider mb-4">Recent Processed Deposits</h4>
-                    <div className="space-y-2">
-                      {depositTransactions.filter(t => t.status === 'completed' || t.status === 'approved').slice(0, 5).map(tx => {
-                        const user = users.find(u => u.id === tx.userId);
-                        return (
-                          <div key={tx.id} className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex justify-between items-center">
-                            <div className="flex items-center gap-3">
-                               <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                                 <Check className="w-4 h-4 text-emerald-500" />
-                               </div>
-                               <div>
-                                 <p className="text-sm font-bold text-white">{user?.name} <span className="text-neutral-500 font-normal ml-1">(+91 {user?.phone})</span></p>
-                                 <p className="text-xs text-neutral-500">{safeFormatDate(tx.date)}</p>
-                               </div>
-                            </div>
-                             <div className="text-right">
-                               <p className="font-bold text-emerald-400">+₹{tx.paymentAmount || tx.amount}</p>
+                          <div className="mt-2">
+                             <div className="flex items-baseline gap-2 mb-1">
+                               <p className="text-2xl font-bold text-white">₹{tx.paymentAmount || tx.amount}</p>
                                {tx.paymentAmount && tx.paymentAmount !== tx.amount && (
-                                 <p className="text-[10px] text-neutral-500">Orig: ₹{tx.amount}</p>
+                                 <span className="text-xs text-neutral-500 font-medium">(Orig: ₹{tx.amount})</span>
+                               )}
+                             </div>
+                             <div className="space-y-1 mt-2">
+                               <p className="text-sm text-neutral-300 flex items-center gap-1.5">
+                                 <UsersIcon className="w-4 h-4 text-neutral-500" /> {user?.name || 'Unknown User'}
+                               </p>
+                               <p className="text-sm text-emerald-400 font-bold flex items-center gap-1.5 bg-emerald-500/10 w-max px-2 py-1 rounded">
+                                 <Smartphone className="w-4 h-4" /> {user?.phone ? `+91 ${user.phone}` : 'No phone'}
+                               </p>
+                               <p className="text-xs text-neutral-400 font-mono mt-1">
+                                 <span className="text-neutral-500">Merchant Order:</span> <span className="text-white font-bold">{tx.merchantOrderNo || tx.reference || 'N/A'}</span>
+                               </p>
+                               {tx.bondPayOrderNo && (
+                                 <p className="text-xs text-cyan-400 font-mono">
+                                   <span className="text-neutral-500">BondPays Order:</span> <span className="font-bold">{tx.bondPayOrderNo}</span>
+                                 </p>
+                               )}
+
+                               {/* 12-Digit UTR Display for Admin */}
+                               {tx.utr ? (
+                                 <div className="mt-2.5 p-2.5 bg-yellow-500/15 border border-yellow-500/40 rounded-xl flex items-center justify-between gap-3 shadow-md">
+                                   <div className="flex items-center gap-2">
+                                     <CheckCircle2 className="w-4 h-4 text-yellow-400 shrink-0" />
+                                     <div>
+                                       <p className="text-[10px] uppercase font-bold text-yellow-500 tracking-wider">12-Digit UPI UTR</p>
+                                       <p className="text-sm font-mono font-black text-yellow-300 tracking-widest select-all">{tx.utr}</p>
+                                     </div>
+                                   </div>
+                                   <div className="flex items-center gap-1.5">
+                                     <button
+                                       type="button"
+                                       onClick={() => {
+                                         if (tx.utr) {
+                                           navigator.clipboard.writeText(tx.utr);
+                                           alert(`Copied UTR: ${tx.utr}`);
+                                         }
+                                       }}
+                                       className="px-2.5 py-1 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 text-xs font-bold rounded-lg border border-yellow-500/40 transition-colors flex items-center gap-1 cursor-pointer"
+                                     >
+                                       <Copy className="w-3.5 h-3.5" />
+                                       <span>Copy</span>
+                                     </button>
+                                     <button
+                                       type="button"
+                                       onClick={() => {
+                                         setAdminEditingUtr({ id: tx.id, ref: tx.reference || tx.id, currentUtr: tx.utr });
+                                         setAdminUtrInput(tx.utr || '');
+                                       }}
+                                       className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs font-bold rounded-lg border border-neutral-700 transition-colors cursor-pointer"
+                                     >
+                                       Edit
+                                     </button>
+                                   </div>
+                                 </div>
+                               ) : (
+                                 <div className="mt-2.5 flex items-center justify-between gap-2 p-2 bg-neutral-900 border border-yellow-500/30 rounded-xl">
+                                   <div className="flex items-center gap-1.5 text-xs text-yellow-400 font-bold">
+                                     <Clock className="w-3.5 h-3.5 text-yellow-500" />
+                                     <span>UTR: Not entered yet</span>
+                                   </div>
+                                   <button
+                                     type="button"
+                                     onClick={() => {
+                                       setAdminEditingUtr({ id: tx.id, ref: tx.reference || tx.id, currentUtr: '' });
+                                       setAdminUtrInput('');
+                                     }}
+                                     className="px-2.5 py-1 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 text-xs font-bold rounded-lg border border-yellow-500/40 transition-colors flex items-center gap-1 cursor-pointer"
+                                   >
+                                     <Plus className="w-3.5 h-3.5" />
+                                     <span>+ Add UTR</span>
+                                   </button>
+                                 </div>
                                )}
                              </div>
                           </div>
-                        )
-                      })}
+                        </div>
+                      </div>
+                      
+                      <div className="flex flex-col gap-2 w-full md:w-auto shrink-0 text-right">
+                        {isPending ? (
+                          <>
+                            <button 
+                              type="button"
+                              disabled={isSyncing}
+                              onClick={async () => {
+                                const target = tx.reference || tx.id;
+                                setAdminSyncingId(target);
+                                try {
+                                  const res = await syncBondPayStatus(target);
+                                  if (res && res.success) {
+                                    alert(`Status checked: ${res.status.toUpperCase()}`);
+                                  } else {
+                                    alert(`Gateway response: ${res?.message || 'Still pending'}`);
+                                  }
+                                } catch (err: any) {
+                                  alert(`Error checking status: ${err.message}`);
+                                } finally {
+                                  setAdminSyncingId(null);
+                                }
+                              }}
+                              className="flex items-center justify-center gap-1.5 bg-neutral-800 hover:bg-neutral-700 text-cyan-300 border border-neutral-700 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                              <span>{isSyncing ? 'Checking...' : 'Sync Gateway Status'}</span>
+                            </button>
+                            <span className="text-[10px] text-neutral-500 font-medium italic block text-right mt-1">
+                              Automatically processed via gateway callback & sync
+                            </span>
+                          </>
+                        ) : (
+                          <div className="flex flex-col gap-1 text-right">
+                            <span className="text-[11px] text-neutral-400 font-mono">
+                              Status: <strong className={isSuccess ? 'text-emerald-400' : 'text-red-400'}>{(tx.status || 'PENDING').toUpperCase()}</strong>
+                            </span>
+                            <span className="text-[10px] text-neutral-500 font-medium italic block mt-1">
+                              Processed automatically via gateway
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      
                     </div>
-                  </div>
-                )}
-                
-              </div>
-
+                  );
+                });
+              })()}
             </div>
-
+          </div>
         </div>
       )}
 
@@ -1564,15 +1699,9 @@ export default function AdminDashboard() {
                         <div className="flex gap-3 w-full">
                           <button 
                             onClick={() => updateTransactionStatus(tx.id, 'approved')} 
-                            className="flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 py-3 rounded-xl font-extrabold transition-all shadow-lg shadow-emerald-500/20 text-sm"
+                            className="flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 py-3 rounded-xl font-extrabold transition-all shadow-lg shadow-emerald-500/20 text-sm cursor-pointer"
                           >
                             <Check className="w-5 h-5" /> Approve Payout
-                          </button>
-                          <button 
-                            onClick={() => updateTransactionStatus(tx.id, 'rejected')} 
-                            className="flex-1 flex items-center justify-center gap-2 bg-neutral-950 border border-neutral-800 text-red-400 hover:bg-red-500/10 py-3 rounded-xl font-bold transition-all text-sm"
-                          >
-                            <X className="w-5 h-5" /> Reject
                           </button>
                         </div>
                       ) : (
@@ -1591,16 +1720,16 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* UPI & QR Settings Tab */}
+      {/* Payment Gateway & Deposit Controls Tab */}
       {activeTab === 'settings' && (
         <div className="space-y-6">
           <div className="flex items-center gap-4 mb-6">
             <button onClick={() => setActiveTab('overview')} className="p-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-neutral-400 hover:text-white transition-all hover:scale-105 active:scale-95 flex-shrink-0">
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <h3 className="text-xl font-bold text-white">App Payment Settings</h3>
+            <h3 className="text-xl font-bold text-white">Payment Gateway Settings</h3>
           </div>
-          <AdminUpiSettingsSection />
+          <AdminGatewaySettingsSection />
         </div>
       )}
 
@@ -1651,19 +1780,96 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
+
+      {/* Admin UTR Update Modal */}
+      {adminEditingUtr && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
+              <div className="flex items-center gap-2 text-yellow-400 font-bold">
+                <CheckCircle2 className="w-5 h-5 text-yellow-400" />
+                <h3>Update 12-Digit UTR</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAdminEditingUtr(null)}
+                className="p-1 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="p-3 bg-neutral-950 border border-neutral-800 rounded-xl space-y-1">
+                <p className="text-[11px] text-neutral-500 font-mono">Reference / Order ID:</p>
+                <p className="text-sm font-mono text-white select-all break-all">{adminEditingUtr.ref}</p>
+                {adminEditingUtr.currentUtr && (
+                  <p className="text-xs text-yellow-400 font-mono mt-1">Current UTR: {adminEditingUtr.currentUtr}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-neutral-300 uppercase tracking-wider mb-1.5">
+                  12-Digit UPI UTR / RRN
+                </label>
+                <input
+                  type="text"
+                  maxLength={12}
+                  value={adminUtrInput}
+                  onChange={(e) => setAdminUtrInput(e.target.value.replace(/\D/g, ''))}
+                  placeholder="e.g. 508492817291"
+                  className="w-full bg-neutral-950 border border-neutral-800 focus:border-yellow-500 rounded-xl px-4 py-3 text-white font-mono text-center tracking-widest text-lg outline-none"
+                  autoFocus
+                />
+                <p className="text-[11px] text-neutral-500 mt-1 text-center font-mono">
+                  {adminUtrInput.length}/12 Digits
+                </p>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAdminEditingUtr(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-neutral-800 text-neutral-300 hover:bg-neutral-800 text-sm font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={adminUtrInput.trim().length !== 12 || isAdminSavingUtr}
+                  onClick={async () => {
+                    if (adminUtrInput.trim().length !== 12) return;
+                    setIsAdminSavingUtr(true);
+                    try {
+                      await updateTransactionUtr(adminEditingUtr.ref, adminUtrInput.trim());
+                      alert(`UTR updated successfully to: ${adminUtrInput.trim()}`);
+                      setAdminEditingUtr(null);
+                    } catch (e: any) {
+                      alert(`Failed to save UTR: ${e?.message || 'Error'}`);
+                    } finally {
+                      setIsAdminSavingUtr(false);
+                    }
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-neutral-950 text-sm font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {isAdminSavingUtr ? 'Saving...' : 'Save UTR'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function AdminUpiSettingsSection() {
-  const adminUpiId = useStore(state => state.adminUpiId);
-  const adminQrCodeUrl = useStore(state => state.adminQrCodeUrl);
+function AdminGatewaySettingsSection() {
   const isDepositLocked = useStore(state => state.isDepositLocked);
   const depositLockMessage = useStore(state => state.depositLockMessage);
   const updateAdminSettings = useStore(state => state.updateAdminSettings);
+  const adminUpiId = useStore(state => state.adminUpiId);
+  const adminQrCodeUrl = useStore(state => state.adminQrCodeUrl);
 
-  const [upiInput, setUpiInput] = useState(adminUpiId || '');
-  const [qrInput, setQrInput] = useState(adminQrCodeUrl || '');
   const [isLocked, setIsLocked] = useState(isDepositLocked || false);
   const [lockMsg, setLockMsg] = useState(depositLockMessage || 'Deposit is currently locked by admin. Please try again later.');
   const [saving, setSaving] = useState(false);
@@ -1673,8 +1879,8 @@ function AdminUpiSettingsSection() {
     e.preventDefault();
     try {
       setSaving(true);
-      await updateAdminSettings(upiInput, qrInput, isLocked, lockMsg);
-      setMsg({ type: 'success', text: 'Admin settings updated successfully!' });
+      await updateAdminSettings(adminUpiId || '', adminQrCodeUrl || '', isLocked, lockMsg);
+      setMsg({ type: 'success', text: 'Gateway and deposit settings updated successfully!' });
       setTimeout(() => setMsg(null), 4000);
     } catch (err: any) {
       setMsg({ type: 'error', text: err?.message || 'Failed to update settings.' });
@@ -1686,12 +1892,12 @@ function AdminUpiSettingsSection() {
   return (
     <div className="max-w-2xl mx-auto bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-xl space-y-6">
       <div className="flex items-center gap-3 border-b border-neutral-800 pb-4">
-        <div className="w-12 h-12 rounded-xl bg-yellow-500/10 text-yellow-400 flex items-center justify-center">
-          <Smartphone className="w-6 h-6" />
+        <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+          <Zap className="w-6 h-6 fill-current" />
         </div>
         <div>
-          <h3 className="text-lg font-bold text-white">Deposit UPI & QR Code Settings</h3>
-          <p className="text-xs text-neutral-400">Update the deposit payment handle and QR code displayed to users.</p>
+          <h3 className="text-lg font-bold text-white">BondPay Payment Gateway</h3>
+          <p className="text-xs text-neutral-400">Automated instant deposit gateway integration & deposit controls.</p>
         </div>
       </div>
 
@@ -1702,40 +1908,47 @@ function AdminUpiSettingsSection() {
         </div>
       )}
 
+      {/* Gateway Status Card */}
+      <div className="bg-neutral-950 border border-emerald-500/30 rounded-2xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+            <h4 className="text-sm font-bold text-white">BondPay Live Status</h4>
+          </div>
+          <span className="text-[11px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-md">
+            Active
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div className="bg-neutral-900 border border-neutral-800 p-3 rounded-xl">
+            <p className="text-neutral-500 text-[10px] uppercase font-bold">Merchant ID</p>
+            <p className="font-mono text-white font-bold mt-0.5">100888369</p>
+          </div>
+          <div className="bg-neutral-900 border border-neutral-800 p-3 rounded-xl">
+            <p className="text-neutral-500 text-[10px] uppercase font-bold">Gateway Endpoint</p>
+            <p className="font-mono text-emerald-400 font-bold mt-0.5 truncate">/api/bondpay/create-order</p>
+          </div>
+          <div className="bg-neutral-900 border border-neutral-800 p-3 rounded-xl sm:col-span-2">
+            <p className="text-neutral-500 text-[10px] uppercase font-bold">Webhook Callback URL</p>
+            <p className="font-mono text-neutral-300 font-medium mt-0.5 truncate">/api/bondpay/callback</p>
+          </div>
+        </div>
+
+        <div className="text-[11px] text-neutral-400 bg-neutral-900/60 p-3 rounded-xl border border-neutral-800">
+          ✓ All deposits made through PhonePe, Google Pay, Paytm, and UPI are automatically verified and credited to user balances instantly.
+        </div>
+      </div>
+
       <form onSubmit={handleSave} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-neutral-300 mb-1.5">Admin UPI ID / VPA</label>
-          <input
-            type="text"
-            value={upiInput}
-            onChange={(e) => setUpiInput(e.target.value)}
-            placeholder="e.g. 7285009425-2@ybl"
-            className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-yellow-500 font-mono"
-            required
-          />
-          <p className="text-xs text-neutral-500 mt-1">Users will pay deposits directly to this UPI handle.</p>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-neutral-300 mb-1.5">Custom QR Code Image URL (Optional)</label>
-          <input
-            type="url"
-            value={qrInput}
-            onChange={(e) => setQrInput(e.target.value)}
-            placeholder="https://example.com/my-qr-code.png"
-            className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-yellow-500 text-sm"
-          />
-          <p className="text-xs text-neutral-500 mt-1">Leave blank to auto-generate a QR code for the UPI ID above, or paste a direct image URL.</p>
-        </div>
-
         <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h4 className="text-sm font-bold text-white flex items-center gap-2">
                 <Clock className="w-4 h-4 text-red-400" />
-                Deposit Locking System
+                Deposit Locking Control
               </h4>
-              <p className="text-[10px] text-neutral-500 mt-0.5">Toggle to prevent users from adding money.</p>
+              <p className="text-[10px] text-neutral-500 mt-0.5">Turn ON to temporarily lock user deposits.</p>
             </div>
             <button
               type="button"
@@ -1759,24 +1972,12 @@ function AdminUpiSettingsSection() {
           )}
         </div>
 
-        <div className="pt-2 flex flex-col items-center">
-          <p className="text-xs text-neutral-400 mb-2 font-semibold">Live Preview of User Payment QR:</p>
-          <div className="p-4 bg-neutral-950 rounded-2xl border border-neutral-800 flex flex-col items-center">
-            <img
-              src={qrInput.trim() || `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${encodeURIComponent(upiInput || '7285009425-2@ybl')}&pn=Admin`}
-              alt="QR Preview"
-              className="w-40 h-40 bg-white p-2 rounded-xl shadow-lg object-contain"
-            />
-            <span className="text-xs font-mono text-emerald-400 mt-3">{upiInput || '7285009425-2@ybl'}</span>
-          </div>
-        </div>
-
         <button
           type="submit"
           disabled={saving}
-          className="w-full py-3.5 bg-yellow-500 hover:bg-yellow-600 text-neutral-950 font-extrabold rounded-xl transition-all shadow-lg shadow-yellow-500/20 disabled:opacity-50"
+          className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-extrabold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
         >
-          {saving ? 'Saving Settings...' : 'Save UPI & QR Settings'}
+          {saving ? 'Saving Settings...' : 'Save Deposit Settings'}
         </button>
       </form>
     </div>

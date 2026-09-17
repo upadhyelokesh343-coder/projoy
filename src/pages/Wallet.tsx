@@ -1,42 +1,73 @@
-import React from "react";
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from "react";
 import { useStore } from '../store';
-import { isValid, parseISO, format } from 'date-fns';
+import { Transaction } from '../types';
+import { isValid, format } from 'date-fns';
+import { 
+  Wallet as WalletIcon, 
+  Plus, 
+  ArrowUpRight, 
+  History, 
+  CheckCircle2, 
+  XCircle, 
+  Clock, 
+  Smartphone, 
+  Building2, 
+  Gift, 
+  Zap, 
+  Loader2, 
+  X, 
+  ExternalLink, 
+  ShieldCheck, 
+  CreditCard,
+  FileCheck2,
+  RefreshCw,
+  AlertCircle
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 
 const safeFormatDate = (dateString?: string) => {
   if (!dateString) return 'Date unavailable';
-  const parsed = new Date(dateString);
-  if (!isValid(parsed)) return 'Invalid date';
-  return format(parsed, "dd MMM, h:mm a");
+  try {
+    const parsed = new Date(dateString);
+    if (!isValid(parsed)) return 'Invalid date';
+    return format(parsed, "dd MMM, h:mm a");
+  } catch (e) {
+    return 'Invalid date';
+  }
 };
-import { Wallet as WalletIcon, Plus, ArrowUpRight, History, CheckCircle2, XCircle, Clock, Smartphone, Building2, Gift, AlertCircle, Copy, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 
 export default function Wallet() {
   const currentUser = useStore(state => state.currentUser);
-  const requestDeposit = useStore(state => state.requestDeposit);
+  const createBondPayOrder = useStore(state => state.createBondPayOrder);
+  const syncBondPayStatus = useStore(state => state.syncBondPayStatus);
+  const updateTransactionUtr = useStore(state => state.updateTransactionUtr);
   const requestWithdraw = useStore(state => state.requestWithdraw);
-  const adminUpiId = useStore(state => state.adminUpiId);
-  const adminQrCodeUrl = useStore(state => state.adminQrCodeUrl);
   const isDepositLocked = useStore(state => state.isDepositLocked);
   const depositLockMessage = useStore(state => state.depositLockMessage);
   const allTransactions = useStore(state => state.transactions);
-  const transactions = allTransactions.filter(t => t.userId === currentUser?.id);
-  const hasDeposited = transactions.some(t => t.type === 'deposit' && t.status === 'approved');
 
-  const [amount, setAmount] = useState('');
-  const [reference, setReference] = useState('');
-  const [addMethod, setAddMethod] = useState<'selection' | 'qr' | 'upi' | null>(null);
-  const [addStep, setAddStep] = useState<'amount' | 'method' | 'pay'>('amount');
-  const [selectedAmount, setSelectedAmount] = useState<number | null>(null);
-  const [actualPaymentAmount, setActualPaymentAmount] = useState<number | null>(null);
-  const [timeLeft, setTimeLeft] = useState(300);
-  const [timerActive, setTimerActive] = useState(false);
-  const [showChangeAmountModal, setShowChangeAmountModal] = useState(false);
-  const [copiedUpi, setCopiedUpi] = useState(false);
-  
-  const predefinedAmounts = [50, 100, 200, 300, 400, 500, 600, 700, 800];
+  const transactions = allTransactions.filter(t => t?.userId === currentUser?.id);
+  const hasDeposited = transactions.some(t => t.type === 'deposit' && (t.status === 'approved' || t.status === 'completed'));
 
+  const predefinedAmounts = [100, 200, 300, 400, 500, 600, 800, 1000];
+  const [amount, setAmount] = useState('100');
+  const [isProcessingBondPay, setIsProcessingBondPay] = useState(false);
+  const [syncingOrderId, setSyncingOrderId] = useState<string | null>(null);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'success' | 'pending' | 'failed'>('all');
+  const [activeGatewayOrder, setActiveGatewayOrder] = useState<{
+    orderNo?: string;
+    merchantOrder?: string;
+    paymentUrl?: string;
+    amount?: number;
+  } | null>(null);
+
+  // Manual UTR submission modal state
+  const [isUtrModalOpen, setIsUtrModalOpen] = useState(false);
+  const [selectedOrderRef, setSelectedOrderRef] = useState('');
+  const [utrInput, setUtrInput] = useState('');
+  const [isSubmittingUtr, setIsSubmittingUtr] = useState(false);
+
+  // Transfer / Withdrawal Modal State
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [transferType, setTransferType] = useState<'upi' | 'bank' | null>(null);
   const [transferAmount, setTransferAmount] = useState('');
@@ -46,59 +77,87 @@ export default function Wallet() {
   const [transferIfsc, setTransferIfsc] = useState('');
   const [transferAccountName, setTransferAccountName] = useState('');
   const [transferBankName, setTransferBankName] = useState('');
+  const [isSubmittingWithdraw, setIsSubmittingWithdraw] = useState(false);
 
+  // Toast / Status Alerts
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isSuccessModalOpen, setIsSuccessModalOpen] = useState(false);
   const [successDetails, setSuccessDetails] = useState({ amount: 0, method: '' });
-  const [isAppWrapper, setIsAppWrapper] = useState(false);
 
   useEffect(() => {
-    const isWebView = 
-      /wv/i.test(navigator.userAgent) || 
-      /WebView/i.test(navigator.userAgent) || 
-      (navigator.userAgent.includes('Android') && navigator.userAgent.includes('Version/')) ||
-      (navigator.userAgent.includes('Android') && !navigator.userAgent.includes('Chrome/')) ||
-      document.referrer.includes('android-app://') ||
-      window.location.search.includes('apk=1');
-      
-    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone;
-    
-    if (isWebView || isStandalone) {
-      setIsAppWrapper(true);
+    if (isSuccessModalOpen) {
+      const timer = setTimeout(() => {
+        setIsSuccessModalOpen(false);
+      }, 3500);
+      return () => clearTimeout(timer);
     }
-  }, []);
+  }, [isSuccessModalOpen]);
+
+  // Active Background Auto-Sync: Poll status for active or pending transactions every 4 seconds
+  useEffect(() => {
+    const pendingList = transactions.filter(
+      t => (t.status === 'pending' || (!t.status && t.type === 'deposit')) && t.type === 'deposit'
+    );
+
+    if (pendingList.length === 0 && !activeGatewayOrder) return;
+
+    const intervalId = setInterval(async () => {
+      // 1. If active gateway order exists, sync it first
+      if (activeGatewayOrder?.merchantOrder) {
+        try {
+          const res = await syncBondPayStatus(activeGatewayOrder.merchantOrder);
+          if (res && res.status === 'completed') {
+            showSuccess(`Payment Verified! ₹${activeGatewayOrder.amount} added to your wallet!`);
+            setActiveGatewayOrder(null);
+            return;
+          }
+        } catch (e) {}
+      }
+
+      // 2. Also sync the most recent pending deposit
+      const latestPending = pendingList[0];
+      if (latestPending) {
+        const targetId = latestPending.merchantOrderNo || latestPending.reference || latestPending.id;
+        try {
+          const res = await syncBondPayStatus(targetId);
+          if (res && res.status === 'completed') {
+            showSuccess(`Payment Verified! ₹${latestPending.amount} added to your wallet!`);
+          }
+        } catch (e) {}
+      }
+    }, 4000);
+
+    return () => clearInterval(intervalId);
+  }, [transactions, activeGatewayOrder, syncBondPayStatus]);
+
+  // Check if active gateway order gets completed in realtime via Firestore / Webhook
+  useEffect(() => {
+    if (activeGatewayOrder?.merchantOrder) {
+      const matchedTx = transactions.find(
+        t => (t.reference === activeGatewayOrder.merchantOrder || t.id === activeGatewayOrder.merchantOrder || t.merchantOrderNo === activeGatewayOrder.merchantOrder) &&
+        (t.status === 'completed' || t.status === 'approved')
+      );
+      if (matchedTx) {
+        showSuccess(`Payment of ₹${matchedTx.amount} confirmed and added to your wallet!`);
+        setActiveGatewayOrder(null);
+      }
+    }
+  }, [transactions, activeGatewayOrder]);
+
+  // Keyboard Escape listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isTransferModalOpen) setIsTransferModalOpen(false);
+        if (isUtrModalOpen) setIsUtrModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isTransferModalOpen, isUtrModalOpen]);
 
   if (!currentUser) return null;
-
-  const getRandomizedAmount = (base: number) => {
-    // Generate a random variation between 1 and 5
-    const diff = Math.floor(Math.random() * 5) + 1;
-    // Randomly decide to add or subtract
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    const finalAmount = base + (diff * sign);
-    // Ensure final amount is positive and not too low
-    return finalAmount > 0 ? finalAmount : base + diff;
-  };
-
-  useEffect(() => {
-    let interval: any;
-    if (timerActive && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft(prev => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0 && timerActive) {
-      setTimerActive(false);
-      setErrorMsg('Payment session expired. Please start over.');
-    }
-    return () => clearInterval(interval);
-  }, [timerActive, timeLeft]);
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
 
   const showError = (msg: string) => {
     setErrorMsg(msg);
@@ -110,116 +169,277 @@ export default function Wallet() {
     setTimeout(() => setSuccessMsg(''), 4000);
   };
 
-  const handleUpiPay = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const upiUri = `upi://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-    window.location.href = upiUri;
-  };
-
-  const handleAppPay = (app: 'gpay' | 'phonepe' | 'paytm', e: React.MouseEvent) => {
-    e.preventDefault();
-    const isAndroid = /Android/i.test(navigator.userAgent);
-    
-    let androidCustomScheme = '';
-    let iOSScheme = '';
-    
-    if (app === 'gpay') {
-      androidCustomScheme = `gpay://upi/pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-      iOSScheme = `upi://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-    } else if (app === 'phonepe') {
-      androidCustomScheme = `phonepe://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-      iOSScheme = `phonepe://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-    } else if (app === 'paytm') {
-      androidCustomScheme = `paytmmp://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-      iOSScheme = `paytmmp://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-    }
-    
-    if (isAndroid) {
-      window.location.href = androidCustomScheme;
-      setTimeout(() => {
-        window.location.href = `upi://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`;
-      }, 1000);
-    } else {
-      window.location.href = iOSScheme;
-    }
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  /**
+   * BONDPAY INSTANT PAYMENT HANDLER
+   * Protected with full try...catch, JSON parsing guard, and safe redirection
+   */
+  const handleBondPayInstant = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     const val = Number(amount);
-    if (!val || val <= 0) {
-      showError('Please enter a valid amount');
-      return;
-    }
-    if (val < 50) {
-      showError('Minimum deposit amount is ₹50');
+    if (!val || val < 10) {
+      showError('Minimum deposit amount is ₹10');
       return;
     }
 
-    requestDeposit(val, reference, actualPaymentAmount || val);
-    showSuccess('Deposit request submitted. Admin will approve it shortly.');
-    setAddStep('amount');
-    setSelectedAmount(null);
-    setActualPaymentAmount(null);
-    setAddMethod(null);
-    setTimerActive(false);
-    setTimeLeft(300);
-    
-    setAmount('');
-    setReference('');
+    setIsProcessingBondPay(true);
+    try {
+      const result = await createBondPayOrder(val);
+      if (result && result.success && result.payment_url) {
+        setActiveGatewayOrder({
+          orderNo: result.order_no,
+          merchantOrder: result.merchant_order_no,
+          paymentUrl: result.payment_url,
+          amount: val
+        });
+        showSuccess('Redirecting to secure BondPay payment gateway...');
+        
+        // Safe redirect with fallback to prevent blank white screens
+        setTimeout(() => {
+          try {
+            if (typeof window !== 'undefined' && result.payment_url) {
+              window.location.assign(result.payment_url);
+            }
+          } catch (navErr) {
+            console.warn("Direct assignment failed, trying window.location.href:", navErr);
+            try {
+              window.location.href = result.payment_url!;
+            } catch (hrefErr) {
+              console.error("Window navigation blocked:", hrefErr);
+            }
+          }
+        }, 500);
+      } else {
+        showError(result?.message || 'Failed to initialize payment gateway. Please try again.');
+      }
+    } catch (err: any) {
+      console.error("BondPay submission error:", err);
+      showError(err?.message || 'Network error connecting to payment gateway.');
+    } finally {
+      setIsProcessingBondPay(false);
+    }
   };
 
-  const StatusIcon = ({ status }: { status: string }) => {
-    switch (status) {
-      case 'approved':
-      case 'completed':
-        return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
-      case 'rejected':
-        return <XCircle className="w-4 h-4 text-red-400" />;
-      default:
-        return <Clock className="w-4 h-4 text-yellow-400" />;
+  /**
+   * UTR MANUAL SUBMISSION HANDLER
+   */
+  const handleUtrSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = utrInput.trim();
+    if (!clean || clean.length < 6) {
+      showError('Please enter a valid 12-digit UPI UTR / Transaction reference.');
+      return;
     }
+
+    setIsSubmittingUtr(true);
+    try {
+      const targetRef = selectedOrderRef || activeGatewayOrder?.merchantOrder || `DEP_${Date.now()}`;
+      
+      // Call server UTR submission API with defensive JSON handling
+      const res = await fetch('/api/bondpay/submit-utr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: targetRef,
+          utr: clean,
+          userId: currentUser.id,
+          amount: activeGatewayOrder?.amount || Number(amount) || 100
+        })
+      });
+
+      let data: any = {};
+      try {
+        const text = await res.text();
+        data = JSON.parse(text);
+      } catch (jsonErr) {
+        console.error('Failed to parse UTR response JSON:', jsonErr);
+        data = { success: res.ok };
+      }
+
+      if (data && data.success) {
+        await updateTransactionUtr(targetRef, clean);
+
+        // Immediate background sync check
+        try {
+          const syncRes = await syncBondPayStatus(targetRef);
+          if (syncRes && syncRes.credited) {
+            showSuccess(`Payment Verified! ₹${syncRes.data?.amount || ''} credited to your wallet!`);
+            setActiveGatewayOrder(null);
+          } else {
+            showSuccess(data?.message || 'UTR details submitted successfully! Verification in progress.');
+          }
+        } catch (syncErr) {
+          showSuccess(data?.message || 'UTR details submitted successfully! Verification in progress.');
+        }
+
+        setIsUtrModalOpen(false);
+        setUtrInput('');
+      } else {
+        showError(data?.message || 'Failed to submit UTR.');
+      }
+    } catch (err: any) {
+      console.error('UTR Submit Error:', err);
+      showError(err?.message || 'Failed to submit UTR.');
+    } finally {
+      setIsSubmittingUtr(false);
+    }
+  };
+
+  /**
+   * CHECK & SYNC GATEWAY STATUS
+   */
+  const handleCheckStatus = async (orderRefOrId: string) => {
+    if (!orderRefOrId) return;
+    setSyncingOrderId(orderRefOrId);
+    try {
+      const res = await syncBondPayStatus(orderRefOrId);
+      if (res && res.success) {
+        if (res.status === 'completed' || res.status === 'approved') {
+          showSuccess(`Payment Verified! ₹${res.data?.amount || ''} credited to your wallet.`);
+        } else if (res.status === 'failed') {
+          showError(`Payment marked as failed / cancelled.`);
+        } else {
+          showSuccess(`Status is PENDING: Bank confirmation in progress. Balance will auto-credit once confirmed.`);
+        }
+      } else {
+        showError(res?.message || 'Status check complete: Pending approval. Please submit 12-digit UTR if paid.');
+      }
+    } catch (e: any) {
+      showError(e?.message || 'Network error while checking status');
+    } finally {
+      setSyncingOrderId(null);
+    }
+  };
+
+  const handleWithdrawSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const hasPlayedMatch = allTransactions.some(t => t.userId === currentUser.id && t.type === 'join_fee');
+      if (!hasPlayedMatch) {
+        showError('Withdraw karne ke liye aapko kam se kam 1 match join karna zaroori hai.');
+        return;
+      }
+
+      const amt = Math.floor(Number(transferAmount));
+      if (!amt || amt <= 0) {
+        showError('Please enter a valid transfer amount.');
+        return;
+      }
+      if (amt < 50) {
+        showError('Minimum withdrawal amount is ₹50');
+        return;
+      }
+      if (amt > currentUser.balance) {
+        showError('Insufficient balance in wallet.');
+        return;
+      }
+
+      if (!transferType) {
+        showError('Please select a transfer destination.');
+        return;
+      }
+
+      if (transferType === 'upi' && !transferUpiId.trim()) {
+        showError('Please enter a valid UPI ID.');
+        return;
+      }
+
+      if (transferType === 'bank') {
+        if (!transferBankName.trim() || !transferAccountName.trim() || !transferAccountNo.trim() || !transferIfsc.trim()) {
+          showError('Please fill in all bank details.');
+          return;
+        }
+        if (transferAccountNo !== transferConfirmAccountNo) {
+          showError('Account numbers do not match.');
+          return;
+        }
+      }
+
+      let details = '';
+      if (transferType === 'upi') {
+        details = `UPI: ${transferUpiId.trim()}`;
+      } else {
+        details = `Bank: ${transferBankName.trim()} | A/C: ${transferAccountNo} | IFSC: ${transferIfsc.trim()} | Name: ${transferAccountName.trim()}`;
+      }
+
+      setIsSubmittingWithdraw(true);
+      const withdrawRef = 'WDR_' + Date.now();
+      await requestWithdraw(amt, details, withdrawRef);
+      setSuccessDetails({ amount: amt, method: transferType });
+      setIsTransferModalOpen(false);
+      setIsSuccessModalOpen(true);
+    } catch (err: any) {
+      console.error("Withdrawal error:", err);
+      showError(err?.message || 'Failed to submit withdrawal request.');
+    } finally {
+      setIsSubmittingWithdraw(false);
+    }
+  };
+
+  const renderStatusBadge = (tx: Transaction) => {
+    const isSuccess = tx.status === 'completed' || tx.status === 'approved';
+    const isFailed = tx.status === 'failed' || tx.status === 'rejected';
+
+    if (isSuccess) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+          <CheckCircle2 className="w-3 h-3 text-emerald-400" /> SUCCESS
+        </span>
+      );
+    }
+    if (isFailed) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30 px-2 py-0.5 rounded-md">
+          <XCircle className="w-3 h-3 text-red-400" /> FAILED
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 px-2 py-0.5 rounded-md">
+        <Clock className="w-3 h-3 text-yellow-400" /> PENDING
+      </span>
+    );
   };
 
   return (
     <>
       <div className="space-y-6 animate-in fade-in duration-300">
-      <div className="bg-gradient-to-br from-emerald-900/40 to-neutral-900 border border-emerald-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden">
-        <div className="absolute top-0 right-0 -mr-8 -mt-8 opacity-10">
-          <WalletIcon className="w-48 h-48 text-emerald-500" />
+        {/* Total Balance Hero Card */}
+        <div className="bg-gradient-to-br from-emerald-900/40 to-neutral-900 border border-emerald-500/20 rounded-3xl p-6 md:p-8 relative overflow-hidden shadow-2xl">
+          <div className="absolute top-0 right-0 -mr-8 -mt-8 opacity-10">
+            <WalletIcon className="w-48 h-48 text-emerald-500" />
+          </div>
+          <p className="text-neutral-400 text-sm font-medium mb-1">Total Balance</p>
+          <h2 className="text-4xl md:text-5xl font-bold text-white mb-6">₹{currentUser.balance}</h2>
+          <div className="flex gap-3 flex-col sm:flex-row">
+            <button 
+              type="button"
+              onClick={() => {
+                const el = document.getElementById('deposit-section');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl font-bold bg-emerald-500 text-neutral-950 shadow-[0_0_15px_rgba(16,185,129,0.3)] hover:bg-emerald-600 transition-all cursor-pointer"
+            >
+              <Plus className="w-5 h-5" /> Add Money to Wallet
+            </button>
+            <button 
+              type="button"
+              onClick={() => {
+                setTransferType(null);
+                setTransferAmount('');
+                setTransferUpiId('');
+                setTransferAccountNo('');
+                setTransferConfirmAccountNo('');
+                setTransferIfsc('');
+                setTransferAccountName('');
+                setTransferBankName('');
+                setIsTransferModalOpen(true);
+              }}
+              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl font-bold bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.3)] hover:bg-blue-500 transition-all cursor-pointer"
+            >
+              <ArrowUpRight className="w-5 h-5" /> Transfer Money
+            </button>
+          </div>
         </div>
-        <p className="text-neutral-400 text-sm font-medium mb-1">Total Balance</p>
-        <h2 className="text-4xl md:text-5xl font-bold text-white mb-6">₹{currentUser.balance}</h2>
-        <div className="flex gap-3 flex-col sm:flex-row">
-          <button 
-            type="button"
-            onClick={() => {
-              setAddStep('amount');
-              setAddMethod(null);
-            }}
-            className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl font-bold bg-emerald-500 text-neutral-950 shadow-[0_0_15px_rgba(16,185,129,0.3)] hover:bg-emerald-600 transition-all"
-          >
-            <Plus className="w-5 h-5" /> Add Money to Wallet
-          </button>
-          <button 
-            type="button"
-            onClick={() => {
-              setTransferType(null);
-              setTransferAmount('');
-              setTransferUpiId('');
-              setTransferAccountNo('');
-              setTransferConfirmAccountNo('');
-              setTransferIfsc('');
-              setTransferAccountName('');
-              setTransferBankName('');
-              setIsTransferModalOpen(true);
-            }}
-            className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl font-bold bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.3)] hover:bg-blue-500 transition-all"
-          >
-            <ArrowUpRight className="w-5 h-5" /> Transfer Money
-          </button>
-        </div>
-      </div>
 
         {/* Toast Messages */}
         <AnimatePresence>
@@ -228,10 +448,10 @@ export default function Wallet() {
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="absolute top-4 left-4 right-4 z-10 bg-red-500/90 text-white px-4 py-3 rounded-xl shadow-lg border border-red-400 text-sm font-medium flex items-center gap-2"
+              className="bg-red-500/90 text-white px-4 py-3 rounded-xl shadow-lg border border-red-400 text-sm font-medium flex items-center gap-2"
             >
               <XCircle className="w-5 h-5 flex-shrink-0" />
-              {errorMsg}
+              <span>{errorMsg}</span>
             </motion.div>
           )}
           {successMsg && (
@@ -239,373 +459,470 @@ export default function Wallet() {
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="absolute top-4 left-4 right-4 z-10 bg-emerald-500/90 text-white px-4 py-3 rounded-xl shadow-lg border border-emerald-400 text-sm font-medium flex items-center gap-2"
+              className="bg-emerald-500/90 text-white px-4 py-3 rounded-xl shadow-lg border border-emerald-400 text-sm font-medium flex items-center gap-2"
             >
               <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-              {successMsg}
+              <span>{successMsg}</span>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <h3 className="font-bold text-lg mb-4 mt-2">Deposit Request</h3>
-        
-        {isDepositLocked ? (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6 text-center space-y-3">
-            <div className="w-12 h-12 bg-red-500/20 text-red-400 rounded-full flex items-center justify-center mx-auto">
-              <Clock className="w-6 h-6" />
+        {/* Active Gateway Payment In-Progress Banner */}
+        {activeGatewayOrder && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-gradient-to-r from-emerald-950 to-neutral-900 border-2 border-emerald-500/50 rounded-2xl p-5 space-y-3 shadow-xl"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
+                <h4 className="font-bold text-white text-base">Payment in Progress (₹{activeGatewayOrder.amount})</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveGatewayOrder(null)}
+                className="text-neutral-400 hover:text-white p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <h4 className="text-white font-bold">Deposit is Currently Locked</h4>
-            <p className="text-sm text-neutral-400 max-w-xs mx-auto">
-              {depositLockMessage}
+            <p className="text-xs text-neutral-300">
+              BondPay payment gateway page open kiya gaya hai. Agar payment complete ho chuki hai, toh balance auto-update hoga ya aap UTR submit kar sakte hain:
             </p>
-            <div className="pt-2">
-              <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider italic">Locked by Admin</p>
+            <div className="flex flex-wrap gap-2.5">
+              {activeGatewayOrder.paymentUrl && (
+                <a
+                  href={activeGatewayOrder.paymentUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-bold text-xs rounded-xl transition-all shadow-md"
+                >
+                  <span>Re-Open Payment Page</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedOrderRef(activeGatewayOrder.merchantOrder || '');
+                  setUtrInput('');
+                  setIsUtrModalOpen(true);
+                }}
+                className="flex items-center gap-2 px-4 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs rounded-xl transition-all border border-neutral-700 cursor-pointer"
+              >
+                <FileCheck2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Submit UTR Number</span>
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Deposit Section (Exclusive BondPay Gateway) */}
+        <div id="deposit-section" className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 sm:p-7 space-y-6">
+          <div className="flex items-center justify-between border-b border-neutral-800 pb-4">
+            <div>
+              <h3 className="font-bold text-xl text-white flex items-center gap-2">
+                <Plus className="w-6 h-6 text-emerald-400" />
+                Add Money to Wallet
+              </h3>
+              <p className="text-xs text-neutral-400 mt-0.5">Instant UPI, QR Code, Cards & NetBanking via BondPay</p>
+            </div>
+            
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-bold">
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>Instant Auto-Credit</span>
             </div>
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key="add"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.2 }}
-                className="space-y-6"
-              >
-                {!hasDeposited && !selectedAmount && (
-                  <div className="bg-gradient-to-r from-amber-500/10 via-yellow-500/10 to-transparent border border-yellow-500/20 rounded-2xl p-4 flex items-center gap-3">
-                    <div className="p-2 bg-yellow-500/20 rounded-xl text-yellow-400">
-                      <Gift className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-bold text-white">First Deposit Bonus!</h4>
-                      <p className="text-xs text-neutral-400">
-                        Get an extra <strong className="text-yellow-400">20% bonus</strong> instantly credited to your wallet when you make your first deposit!
-                      </p>
-                    </div>
-                  </div>
-                )}
 
-                {addStep === 'amount' && (
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-neutral-400 mb-2">Select or Enter Amount (₹)</label>
-                      <style>{`
-                        @keyframes slideDownShine {
-                          0% { transform: translateY(-150%) skewY(-30deg); opacity: 0; }
-                          20% { opacity: 0.8; }
-                          80% { transform: translateY(250%) skewY(-30deg); opacity: 0; }
-                          100% { transform: translateY(250%) skewY(-30deg); opacity: 0; }
-                        }
-                        .animate-slide-shine {
-                          animation: slideDownShine 2.5s infinite linear;
-                        }
-                      `}</style>
-                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5 mb-3">
-                        {predefinedAmounts.map((amt, idx) => (
-                          <button
-                            key={amt}
-                            type="button"
-                            onClick={() => {
-                              setSelectedAmount(amt);
-                              const randomized = getRandomizedAmount(amt);
-                              setActualPaymentAmount(randomized);
-                              setAmount(amt.toString());
-                              setAddStep('method');
-                            }}
-                            style={{ animationDelay: `${idx * 0.1}s` }}
-                            className="relative py-3 px-4 bg-gradient-to-br from-[#E6C27A] via-[#D4AF37] to-[#AA7C11] border border-[#FCEEAA] border-b-[3px] border-b-[#7A5A0A] border-r-[#7A5A0A] hover:brightness-110 hover:scale-[1.02] active:scale-95 rounded-xl font-black text-[#2A1D00] transition-all text-sm shadow-md shadow-black/40 overflow-hidden group"
-                          >
-                            <div className="absolute top-0 left-0 w-full h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none" />
-                            <div className="absolute inset-0 flex justify-center pointer-events-none overflow-hidden">
-                                <div className="w-8 h-full bg-gradient-to-r from-transparent via-white/70 to-transparent blur-[2px] animate-slide-shine" style={{ animationDelay: `${idx * 0.15}s` }} />
-                            </div>
-                            <span className="relative z-10 drop-shadow-sm">₹{amt}</span>
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 font-bold">₹</span>
-                        <input
-                          type="number"
-                          value={amount}
-                          onChange={(e) => setAmount(e.target.value)}
-                          placeholder="Enter custom amount"
-                          min="50"
-                          className="w-full pl-8 pr-4 py-3.5 bg-neutral-900 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 transition-colors font-bold text-lg"
-                        />
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const val = Number(amount);
-                        if (!val || val <= 0) {
-                          showError('Please enter a valid amount');
-                          return;
-                        }
-                        if (val < 50) {
-                          showError('Minimum deposit amount is ₹50');
-                          return;
-                        }
-                        setSelectedAmount(val);
-                        const randomized = getRandomizedAmount(val);
-                        setActualPaymentAmount(randomized);
-                        setAddStep('method');
-                      }}
-                      className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-extrabold rounded-xl transition-all shadow-lg shadow-emerald-500/20"
-                    >
-                      Proceed to Deposit
-                    </button>
-                  </div>
-                )}
-
-                {addStep === 'method' && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between bg-neutral-900 p-4 rounded-xl border border-neutral-800">
-                      <div>
-                        <p className="text-xs text-neutral-400">Request Amount: ₹{amount}</p>
-                        <p className="text-xl font-bold text-white">Payment Amount: <span className="text-emerald-400">₹{actualPaymentAmount}</span></p>
-                        <p className="text-[10px] text-neutral-500 mt-1">* This slight variation helps us verify your payment faster.</p>
-                      </div>
-                      <button 
-                        type="button"
-                        onClick={() => setAddStep('amount')}
-                        className="text-xs text-emerald-400 font-bold underline hover:text-emerald-300"
-                      >
-                        Change Amount
-                      </button>
-                    </div>
-
-                    <p className="text-sm font-medium text-neutral-300">Choose Payment Method:</p>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAddMethod('qr');
-                          setAddStep('pay');
-                          setTimerActive(true);
-                        }}
-                        className="flex flex-col items-center justify-center gap-2 p-5 rounded-2xl border border-neutral-800 bg-neutral-900 hover:border-emerald-500 transition-all text-white group"
-                      >
-                        <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center group-hover:scale-110 transition-transform">
-                          <Smartphone className="w-6 h-6" />
-                        </div>
-                        <span className="text-sm font-bold">Scan QR Code</span>
-                        <span className="text-[10px] text-neutral-500">Pay via GPay / PhonePe / Paytm</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAddMethod('upi');
-                          setAddStep('pay');
-                          setTimerActive(true);
-                        }}
-                        className="flex flex-col items-center justify-center gap-2 p-5 rounded-2xl border border-neutral-800 bg-neutral-900 hover:border-emerald-500 transition-all text-white group"
-                      >
-                        <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center group-hover:scale-110 transition-transform">
-                          <Building2 className="w-6 h-6" />
-                        </div>
-                        <span className="text-sm font-bold">UPI App / ID</span>
-                        <span className="text-[10px] text-neutral-500">Direct UPI Transfer</span>
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setAddStep('amount')}
-                      className="w-full py-2.5 text-sm text-neutral-400 hover:text-white"
-                    >
-                      ← Back to Amount Selection
-                    </button>
-                  </div>
-                )}
-
-                {addStep === 'pay' && (
-                  <div className="space-y-5 bg-neutral-900 p-5 rounded-2xl border border-neutral-800">
-                    <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
-                      <div>
-                        <p className="text-xs text-neutral-400">Amount to Transfer</p>
-                        <p className="text-2xl font-extrabold text-emerald-400">₹{actualPaymentAmount}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs text-neutral-400">Session Timer</p>
-                        <p className={`text-sm font-mono font-bold ${timeLeft < 60 ? 'text-red-400 animate-pulse' : 'text-yellow-400'}`}>
-                          {formatTime(timeLeft)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl flex items-start gap-2.5 text-yellow-300 text-xs">
-                      <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                      <span>NOTE: Please pay the exact amount of <strong>₹{actualPaymentAmount}</strong> shown above to ensure instant wallet credit.</span>
-                    </div>
-
-                    {addMethod === 'qr' && (
-                      <div className="flex flex-col items-center p-4 bg-neutral-950 rounded-2xl border border-neutral-800">
-                        <p className="text-xs text-neutral-400 mb-3 font-semibold">Scan QR code using any UPI app:</p>
-                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(`upi://pay?pa=${adminUpiId}&pn=Admin&am=${actualPaymentAmount}&cu=INR`)}`} className="w-40 h-40 bg-white p-2 rounded-xl shadow-lg object-contain" />
-                      </div>
-                    )}
-                    
-                    <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl space-y-3">
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm text-neutral-300">Pay to UPI ID: <strong className="text-white font-mono">{adminUpiId}</strong></p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(adminUpiId);
-                            setCopiedUpi(true);
-                            setTimeout(() => setCopiedUpi(false), 2000);
-                          }}
-                          className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-xs text-emerald-400 font-semibold rounded-lg flex items-center gap-1 transition-colors"
-                        >
-                          {copiedUpi ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                          {copiedUpi ? 'Copied' : 'Copy UPI'}
-                        </button>
-                      </div>
-                      {isAppWrapper ? (
-                        <div className="flex flex-col gap-3">
-                          <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl">
-                            <p className="text-xs text-amber-400 text-center font-medium">
-                              ⚠️ UPI se paisa dalne ke liye kripya ise website mein open karein.
-                            </p>
-                          </div>
-                          <a
-                            href="https://projoy.vercel.app/wallet"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block w-full text-center py-3 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 rounded-xl font-extrabold transition-all shadow-md shadow-emerald-500/10"
-                          >
-                            Open Website to Pay
-                          </a>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-2.5">
-                          <button
-                            type="button"
-                            onClick={handleUpiPay}
-                            className="w-full text-center py-3 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 rounded-xl font-extrabold transition-all shadow-md shadow-emerald-500/10"
-                          >
-                            Pay via UPI App
-                          </button>
-                          
-                          <div className="pt-2 border-t border-emerald-500/10">
-                            <p className="text-[10px] text-neutral-400 text-center font-medium mb-2">
-                              Or open directly in your preferred app:
-                            </p>
-                             <div className="grid grid-cols-3 gap-2">
-                              <button
-                                type="button"
-                                onClick={(e) => handleAppPay('gpay', e)}
-                                className="py-2 px-1 text-center text-[11px] bg-neutral-950 border border-neutral-800 hover:border-emerald-500/40 text-neutral-300 hover:text-white rounded-lg font-bold transition-all"
-                              >
-                                GPay
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => handleAppPay('phonepe', e)}
-                                className="py-2 px-1 text-center text-[11px] bg-neutral-950 border border-neutral-800 hover:border-emerald-500/40 text-neutral-300 hover:text-white rounded-lg font-bold transition-all"
-                              >
-                                PhonePe
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => handleAppPay('paytm', e)}
-                                className="py-2 px-1 text-center text-[11px] bg-neutral-950 border border-neutral-800 hover:border-emerald-500/40 text-neutral-300 hover:text-white rounded-lg font-bold transition-all"
-                              >
-                                Paytm
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-neutral-400 mb-2">Transaction Reference (UTR / UPI Ref No)</label>
-                      <input
-                        type="text"
-                        value={reference}
-                        onChange={(e) => setReference(e.target.value)}
-                        placeholder="Enter 12-digit UTR number"
-                        className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 transition-colors font-mono"
-                        required
-                      />
-                    </div>
-
-                    <div className="flex gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setAddStep('method')}
-                        className="px-4 py-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold rounded-xl text-sm"
-                      >
-                        Back
-                      </button>
-                      <button
-                        type="submit"
-                        className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-extrabold rounded-xl transition-all shadow-lg"
-                      >
-                        Submit Deposit Proof
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </motion.div>
-            </AnimatePresence>
-          </form>
-        )}
-      </div>
-
-      <div>
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-          <History className="w-5 h-5 text-emerald-400" />
-          Transaction History
-        </h3>
-        <div className="space-y-3">
-          {transactions.length === 0 ? (
-            <div className="text-center p-6 bg-neutral-900 border border-neutral-800 rounded-2xl text-neutral-500">
-              No transactions yet.
+          {isDepositLocked ? (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6 text-center space-y-3">
+              <div className="w-12 h-12 bg-red-500/20 text-red-400 rounded-full flex items-center justify-center mx-auto">
+                <Clock className="w-6 h-6" />
+              </div>
+              <h4 className="text-white font-bold">Deposit is Currently Locked</h4>
+              <p className="text-sm text-neutral-400 max-w-xs mx-auto">
+                {depositLockMessage}
+              </p>
+              <div className="pt-2">
+                <p className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider italic">Locked by Admin</p>
+              </div>
             </div>
           ) : (
-            transactions.map((tx) => (
-              <motion.div 
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                key={tx.id} 
-                className="bg-neutral-900 border border-neutral-800 p-4 rounded-xl flex items-center justify-between"
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-lg ${
-                    tx.type === 'deposit' || tx.type === 'prize' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
-                  }`}>
-                    {tx.type === 'deposit' || tx.type === 'prize' ? <Plus className="w-5 h-5" /> : <ArrowUpRight className="w-5 h-5" />}
+            <form onSubmit={handleBondPayInstant} className="space-y-6">
+              {!hasDeposited && (
+                <div className="bg-gradient-to-r from-amber-500/10 via-yellow-500/10 to-transparent border border-yellow-500/20 rounded-2xl p-4 flex items-center gap-3">
+                  <div className="p-2 bg-yellow-500/20 rounded-xl text-yellow-400">
+                    <Gift className="w-6 h-6" />
                   </div>
                   <div>
-                    <p className="font-bold text-white capitalize">{(tx.type || 'transaction').replace('_', ' ')}</p>
-                    <div className="flex items-center gap-2 text-xs text-neutral-400 mt-1">
-                      <span>{safeFormatDate(tx.date)}</span>
-                      <span className="flex items-center gap-1">
-                        • <StatusIcon status={tx.status} /> {tx.status}
-                      </span>
-                    </div>
+                    <h4 className="text-sm font-bold text-white">First Deposit Bonus!</h4>
+                    <p className="text-xs text-neutral-400">
+                      Get an extra <strong className="text-yellow-400">20% bonus</strong> automatically credited to your wallet upon your first successful deposit!
+                    </p>
                   </div>
                 </div>
-                <div className={`font-bold ${tx.type === 'deposit' || tx.type === 'prize' ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {tx.type === 'deposit' || tx.type === 'prize' ? '+' : '-'}₹{tx.amount}
+              )}
+
+              {/* Amount Selection */}
+              <div>
+                <label className="block text-sm font-medium text-neutral-300 mb-2">Select Deposit Amount (₹)</label>
+                <div className="grid grid-cols-4 gap-2 mb-3">
+                  {predefinedAmounts.map((amt) => (
+                    <button
+                      key={amt}
+                      type="button"
+                      onClick={() => setAmount(amt.toString())}
+                      className={`py-2.5 px-3 rounded-xl font-black text-sm transition-all border cursor-pointer ${
+                        amount === amt.toString()
+                          ? 'bg-emerald-500 text-neutral-950 border-emerald-400 shadow-md shadow-emerald-500/20 scale-[1.02]'
+                          : 'bg-neutral-950 text-white border-neutral-800 hover:border-neutral-700'
+                      }`}
+                    >
+                      ₹{amt}
+                    </button>
+                  ))}
                 </div>
-              </motion.div>
-            ))
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-500 font-bold">₹</span>
+                  <input
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Enter custom amount (Min ₹10)"
+                    min="10"
+                    className="w-full pl-8 pr-4 py-3.5 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 transition-colors font-bold text-lg"
+                  />
+                </div>
+              </div>
+
+              {/* Supported Payment Gateways Features */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex items-center gap-2.5">
+                  <Smartphone className="w-5 h-5 text-purple-400" />
+                  <div>
+                    <p className="text-xs font-bold text-white">PhonePe</p>
+                    <p className="text-[10px] text-neutral-500">Instant UPI</p>
+                  </div>
+                </div>
+                <div className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex items-center gap-2.5">
+                  <Smartphone className="w-5 h-5 text-blue-400" />
+                  <div>
+                    <p className="text-xs font-bold text-white">Google Pay</p>
+                    <p className="text-[10px] text-neutral-500">Direct Pay</p>
+                  </div>
+                </div>
+                <div className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex items-center gap-2.5">
+                  <Smartphone className="w-5 h-5 text-sky-400" />
+                  <div>
+                    <p className="text-xs font-bold text-white">Paytm UPI</p>
+                    <p className="text-[10px] text-neutral-500">Fast QR</p>
+                  </div>
+                </div>
+                <div className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex items-center gap-2.5">
+                  <CreditCard className="w-5 h-5 text-emerald-400" />
+                  <div>
+                    <p className="text-xs font-bold text-white">Any UPI / Cards</p>
+                    <p className="text-[10px] text-neutral-500">Auto Credit</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3.5 flex items-center gap-2.5 text-xs text-neutral-400">
+                <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
+                <span>
+                  Payment complete hote hi wallet balance <strong className="text-emerald-400">100% automated</strong> update ho jayega bina kisi error ke.
+                </span>
+              </div>
+
+              {/* Instant Pay Button */}
+              <button
+                type="submit"
+                disabled={isProcessingBondPay || !amount || Number(amount) < 10}
+                className="w-full py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-neutral-950 font-black rounded-xl transition-all shadow-xl shadow-emerald-500/20 flex items-center justify-center gap-2 text-base cursor-pointer disabled:opacity-50 active:scale-[0.99]"
+              >
+                {isProcessingBondPay ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>Connecting to Secure Payment Gateway...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-5 h-5 fill-current" />
+                    <span>Pay ₹{amount || '100'} with BondPay</span>
+                  </>
+                )}
+              </button>
+            </form>
           )}
+        </div>
+
+        {/* Transaction History Section */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 sm:p-7 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800/80 pb-4">
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <History className="w-5 h-5 text-emerald-400" />
+                Transaction History
+              </h3>
+              <p className="text-xs text-neutral-400 mt-0.5">Live status of your deposits, withdrawals & game winnings</p>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedOrderRef('');
+                  setUtrInput('');
+                  setIsUtrModalOpen(true);
+                }}
+                className="text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-bold cursor-pointer transition-all"
+              >
+                <FileCheck2 className="w-3.5 h-3.5" />
+                Submit UTR
+              </button>
+            </div>
+          </div>
+
+          {/* Filter Tabs */}
+          {transactions.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 p-1 bg-neutral-950 border border-neutral-800 rounded-2xl">
+              {[
+                { key: 'all', label: 'All', count: transactions.length },
+                { 
+                  key: 'success', 
+                  label: 'Success', 
+                  count: transactions.filter(t => t.status === 'completed' || t.status === 'approved').length 
+                },
+                { 
+                  key: 'pending', 
+                  label: 'Pending', 
+                  count: transactions.filter(t => t.status === 'pending' || (!t.status && t.type === 'deposit')).length 
+                },
+                { 
+                  key: 'failed', 
+                  label: 'Failed', 
+                  count: transactions.filter(t => t.status === 'failed' || t.status === 'rejected').length 
+                },
+              ].map(tab => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setHistoryFilter(tab.key as any)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    historyFilter === tab.key
+                      ? 'bg-neutral-800 text-white shadow-sm'
+                      : 'text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    historyFilter === tab.key ? 'bg-neutral-700 text-white' : 'bg-neutral-900 text-neutral-500'
+                  }`}>
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {transactions.length === 0 ? (
+              <div className="text-center p-8 bg-neutral-950 border border-neutral-800 rounded-2xl text-neutral-500">
+                No transactions yet.
+              </div>
+            ) : (() => {
+              const filteredList = transactions.filter(tx => {
+                if (historyFilter === 'all') return true;
+                if (historyFilter === 'success') return tx.status === 'completed' || tx.status === 'approved';
+                if (historyFilter === 'pending') return tx.status === 'pending' || (!tx.status && tx.type === 'deposit');
+                if (historyFilter === 'failed') return tx.status === 'failed' || tx.status === 'rejected';
+                return true;
+              });
+
+              if (filteredList.length === 0) {
+                return (
+                  <div className="text-center p-8 bg-neutral-950 border border-neutral-800 rounded-2xl text-neutral-500 text-xs">
+                    No {historyFilter} transactions found.
+                  </div>
+                );
+              }
+
+              return filteredList.map((tx) => {
+                const isDeposit = tx.type === 'deposit' || tx.type === 'prize';
+                const isPending = tx.status === 'pending' || (!tx.status && tx.type === 'deposit');
+                const isSyncing = syncingOrderId === (tx.reference || tx.id);
+
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    key={tx.id} 
+                    className={`bg-neutral-950 border rounded-2xl p-4 transition-all ${
+                      isPending ? 'border-yellow-500/30' : tx.status === 'failed' || tx.status === 'rejected' ? 'border-red-500/20' : 'border-neutral-800'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        <div className={`p-2.5 rounded-xl shrink-0 mt-0.5 ${
+                          isDeposit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                        }`}>
+                          {isDeposit ? <Plus className="w-5 h-5" /> : <ArrowUpRight className="w-5 h-5" />}
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-bold text-white capitalize text-sm sm:text-base">
+                              {(tx.type || 'transaction').replace('_', ' ')}
+                            </p>
+                            {renderStatusBadge(tx)}
+                          </div>
+                          
+                          <div className="flex items-center gap-2 text-xs text-neutral-400">
+                            <span>{safeFormatDate(tx.date)}</span>
+                          </div>
+
+                          {tx.merchantOrderNo && (
+                            <p className="text-[11px] text-neutral-400 font-mono">
+                              Merchant Order: <span className="text-white font-bold">{tx.merchantOrderNo}</span>
+                            </p>
+                          )}
+                          {tx.bondPayOrderNo && (
+                            <p className="text-[11px] text-cyan-400 font-mono">
+                              BondPays Order: <span className="font-bold">{tx.bondPayOrderNo}</span>
+                            </p>
+                          )}
+                          {!tx.merchantOrderNo && tx.reference && (
+                            <p className="text-[11px] text-neutral-500 font-mono">Order Ref: {tx.reference}</p>
+                          )}
+                          {tx.utr && (
+                            <p className="text-[11px] text-emerald-400 font-mono">
+                              UTR: <span className="font-bold">{tx.utr}</span>
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        <span className={`font-black text-base sm:text-lg ${isDeposit ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {isDeposit ? '+' : '-'}₹{tx.amount}
+                        </span>
+
+                        {isPending && (
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            <button
+                              type="button"
+                              disabled={isSyncing}
+                              onClick={() => handleCheckStatus(tx.reference || tx.id)}
+                              className="text-[10px] px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 rounded-lg font-bold transition-all flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              title="Check live gateway status"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin text-emerald-400' : ''}`} />
+                              <span>{isSyncing ? 'Checking...' : 'Check Status'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedOrderRef(tx.reference || tx.id);
+                                setUtrInput(tx.utr || '');
+                                setIsUtrModalOpen(true);
+                              }}
+                              className="text-[10px] px-2.5 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-lg font-bold transition-colors cursor-pointer"
+                            >
+                              Enter UTR
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {isPending && (
+                      <div className="mt-3 pt-2.5 border-t border-neutral-900 flex items-center justify-between text-[11px] text-yellow-400/90 bg-yellow-500/5 px-2.5 py-1.5 rounded-lg">
+                        <div className="flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 shrink-0 text-yellow-400 animate-pulse" />
+                          <span>Bank verification in progress. Click <strong>Check Status</strong> or submit UTR to confirm immediately.</span>
+                        </div>
+                      </div>
+                    )}
+                  </motion.div>
+                );
+              });
+            })()}
+          </div>
         </div>
       </div>
 
-      {/* Transfer Money Modal */}
+      {/* Manual UTR Submit Modal */}
+      <AnimatePresence>
+        {isUtrModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 w-full max-w-md shadow-2xl relative space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <FileCheck2 className="w-5 h-5 text-emerald-400" />
+                  Submit UTR / Ref Number
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsUtrModalOpen(false)}
+                  className="p-1.5 text-neutral-400 hover:text-white rounded-xl bg-neutral-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-xs text-neutral-400">
+                Agar aapne payment app (PhonePe, GPay, Paytm) se pay kiya hai, toh 12-digit UTR/Transaction Ref number yahan darj karein:
+              </p>
+
+              <form onSubmit={handleUtrSubmit} className="space-y-4">
+                {selectedOrderRef && (
+                  <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
+                    <p className="text-[10px] text-neutral-500 uppercase font-bold">Order Reference</p>
+                    <p className="text-xs font-mono text-white font-bold">{selectedOrderRef}</p>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                    12-digit UPI UTR / Transaction ID
+                  </label>
+                  <input
+                    type="text"
+                    value={utrInput}
+                    onChange={(e) => setUtrInput(e.target.value.replace(/\s+/g, ''))}
+                    placeholder="e.g. 423987123456"
+                    className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 font-mono text-sm uppercase"
+                    required
+                    maxLength={30}
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmittingUtr || !utrInput.trim()}
+                  className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-black rounded-xl transition-all shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isSubmittingUtr ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Submitting UTR...</span>
+                    </>
+                  ) : (
+                    <span>Submit & Verify UTR</span>
+                  )}
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Transfer / Withdrawal Modal */}
       <AnimatePresence>
         {isTransferModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
@@ -613,88 +930,22 @@ export default function Wallet() {
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-2xl relative"
+              className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-2xl relative"
             >
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between mb-4 border-b border-neutral-800 pb-3">
                 <h3 className="text-xl font-bold text-white flex items-center gap-2">
                   <ArrowUpRight className="w-6 h-6 text-blue-400" />
-                  Transfer Money
+                  Transfer Money (Withdrawal)
                 </h3>
                 <button 
                   onClick={() => setIsTransferModalOpen(false)}
-                  className="p-2 text-neutral-400 hover:text-white rounded-lg bg-neutral-800"
+                  className="p-1.5 text-neutral-400 hover:text-white rounded-xl bg-neutral-800 cursor-pointer"
                 >
-                  ✕
+                  <X className="w-4 h-4" />
                 </button>
               </div>
 
-              <form onSubmit={async (e) => {
-                e.preventDefault();
-                
-                // Check if user has played at least one match
-                const hasPlayedMatch = allTransactions.some(t => t.userId === currentUser.id && t.type === 'join_fee');
-                if (!hasPlayedMatch) {
-                  showError('Withdraw karne ke liye aapko kam se kam 1 match join karna zaroori hai.');
-                  return;
-                }
-
-                const amt = Math.floor(Number(transferAmount));
-                if (!amt || amt <= 0) {
-                  showError('Please enter a valid transfer amount.');
-                  return;
-                }
-                if (amt < 50) {
-                  showError('Minimum withdrawal amount is ₹50');
-                  return;
-                }
-                if (amt > currentUser.balance) {
-                  showError('Insufficient balance in wallet.');
-                  return;
-                }
-
-                if (!transferType) {
-                  showError('Please select a transfer method.');
-                  return;
-                }
-
-                if (transferType === 'upi' && !transferUpiId.trim()) {
-                  showError('Please enter a valid UPI ID.');
-                  return;
-                }
-
-                if (transferType === 'bank') {
-                  if (!transferBankName.trim() || !transferAccountName.trim() || !transferAccountNo.trim() || !transferIfsc.trim()) {
-                    showError('Please fill in all bank details.');
-                    return;
-                  }
-                  if (transferAccountNo !== transferConfirmAccountNo) {
-                    showError('Account numbers do not match.');
-                    return;
-                  }
-                }
-
-                let details = '';
-                if (transferType === 'upi') {
-                  details = `Transfer to UPI: ${transferUpiId.trim()}`;
-                } else {
-                  details = `Bank Transfer: ${transferBankName.trim()} | A/C: ${transferAccountNo} | IFSC: ${transferIfsc.trim()} | Name: ${transferAccountName.trim()}`;
-                }
-
-                try {
-                  await requestWithdraw(amt, details);
-                  setSuccessDetails({ amount: amt, method: transferType });
-                  setIsTransferModalOpen(false);
-                  setIsSuccessModalOpen(true);
-                } catch (err: any) {
-                  showError(err?.message || 'Transfer failed.');
-                }
-              }} className="space-y-4">
-                {errorMsg && (
-                  <div className="bg-red-500/20 border border-red-500/40 text-red-300 px-4 py-3 rounded-xl text-sm font-medium flex items-center gap-2">
-                    <XCircle className="w-5 h-5 flex-shrink-0" />
-                    <span>{errorMsg}</span>
-                  </div>
-                )}
+              <form onSubmit={handleWithdrawSubmit} className="space-y-4">
                 {!transferType ? (
                   <div className="space-y-4 py-2">
                     <p className="text-sm text-neutral-400">Select transfer destination:</p>
@@ -702,7 +953,7 @@ export default function Wallet() {
                       <button
                         type="button"
                         onClick={() => setTransferType('upi')}
-                        className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-neutral-700 bg-neutral-950 hover:border-blue-500 transition-all text-white group"
+                        className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-neutral-700 bg-neutral-950 hover:border-blue-500 transition-all text-white group cursor-pointer"
                       >
                         <div className="w-12 h-12 rounded-xl bg-blue-500/10 text-blue-400 flex items-center justify-center group-hover:scale-110 transition-transform">
                           <Smartphone className="w-6 h-6" />
@@ -712,7 +963,7 @@ export default function Wallet() {
                       <button
                         type="button"
                         onClick={() => setTransferType('bank')}
-                        className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-neutral-700 bg-neutral-950 hover:border-blue-500 transition-all text-white group"
+                        className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-neutral-700 bg-neutral-950 hover:border-blue-500 transition-all text-white group cursor-pointer"
                       >
                         <div className="w-12 h-12 rounded-xl bg-blue-500/10 text-blue-400 flex items-center justify-center group-hover:scale-110 transition-transform">
                           <Building2 className="w-6 h-6" />
@@ -723,7 +974,9 @@ export default function Wallet() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    <button type="button" onClick={() => setTransferType(null)} className="text-sm text-blue-400 flex items-center gap-1 font-bold">← Change Destination Type</button>
+                    <button type="button" onClick={() => setTransferType(null)} className="text-xs text-blue-400 hover:underline flex items-center gap-1 font-bold cursor-pointer">
+                      ← Change Destination Type
+                    </button>
                     
                     <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800 flex justify-between items-center">
                       <span className="text-xs text-neutral-400">Available Wallet Balance:</span>
@@ -731,7 +984,7 @@ export default function Wallet() {
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-neutral-400 mb-1">Transfer Amount (₹)</label>
+                      <label className="block text-xs font-semibold text-neutral-400 mb-1">Transfer Amount (₹) - Min ₹50</label>
                       <input
                         type="number"
                         value={transferAmount}
@@ -746,13 +999,13 @@ export default function Wallet() {
 
                     {transferType === 'upi' ? (
                       <div>
-                        <label className="block text-sm font-medium text-neutral-400 mb-2">Recipient UPI ID / VPA</label>
+                        <label className="block text-xs font-semibold text-neutral-400 mb-1">Recipient UPI ID / VPA</label>
                         <input
                           type="text"
                           value={transferUpiId}
                           onChange={(e) => setTransferUpiId(e.target.value)}
                           placeholder="e.g., username@oksbi"
-                          className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                          className="w-full px-4 py-3 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
                           required
                         />
                       </div>
@@ -809,7 +1062,7 @@ export default function Wallet() {
                             value={transferIfsc}
                             onChange={(e) => setTransferIfsc(e.target.value.toUpperCase())}
                             placeholder="e.g., SBIN0001234"
-                            className="w-full px-4 py-2.5 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-blue-500 text-sm uppercase"
+                            className="w-full px-4 py-2.5 bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-blue-500 text-sm uppercase font-mono"
                             required
                           />
                         </div>
@@ -818,9 +1071,10 @@ export default function Wallet() {
 
                     <button
                       type="submit"
-                      className="w-full py-3.5 mt-2 bg-blue-600 hover:bg-blue-500 text-white font-extrabold rounded-xl transition-all shadow-lg shadow-blue-600/20"
+                      disabled={isSubmittingWithdraw}
+                      className="w-full py-3.5 mt-2 bg-blue-600 hover:bg-blue-500 text-white font-extrabold rounded-xl transition-all shadow-lg shadow-blue-600/20 cursor-pointer disabled:opacity-50"
                     >
-                      Transfer Now (Deduct from Wallet)
+                      {isSubmittingWithdraw ? 'Submitting Request...' : 'Submit Withdrawal Request'}
                     </button>
                   </div>
                 )}
@@ -829,6 +1083,7 @@ export default function Wallet() {
           </div>
         )}
       </AnimatePresence>
+
       {/* Success Modal Popup */}
       <AnimatePresence>
         {isSuccessModalOpen && (
@@ -842,20 +1097,20 @@ export default function Wallet() {
               <div className="w-16 h-16 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-2 animate-bounce">
                 <CheckCircle2 className="w-10 h-10" />
               </div>
-              <h3 className="text-2xl font-extrabold text-white">Withdrawal Request Submitted Successfully!</h3>
+              <h3 className="text-xl font-extrabold text-white">Withdrawal Request Submitted!</h3>
               <p className="text-sm text-neutral-300">
-                Amount of <strong className="text-emerald-400">₹{successDetails.amount}</strong> has been successfully processed and deducted from your wallet.
+                Amount of <strong className="text-emerald-400">₹{successDetails.amount}</strong> has been deducted from your wallet and submitted for admin approval.
               </p>
               <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-xl">
                 <p className="text-xs text-emerald-400 font-bold flex items-center justify-center gap-1.5">
                   <Clock className="w-4 h-4" />
-                  Aapke paise 24 ghante ke andar transfer ho jayenge.
+                  Paise admin verification ke baad transfer ho jayenge.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setIsSuccessModalOpen(false)}
-                className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-extrabold rounded-xl transition-all shadow-lg"
+                className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 text-neutral-950 font-extrabold rounded-xl transition-all cursor-pointer"
               >
                 Done
               </button>
